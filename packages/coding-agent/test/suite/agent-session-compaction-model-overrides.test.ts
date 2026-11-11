@@ -5,15 +5,15 @@ import { createHarness, type Harness } from "./harness.ts";
 
 function seedHistory(harness: Harness, totalTokens = 650): string {
 	const model = harness.session.model!;
-	let recentUserId = "";
+	let recentAssistantId = "";
 	for (const label of ["old", "recent"]) {
-		recentUserId = harness.sessionManager.appendMessage({
+		harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: label.padEnd(400, "x") }],
 			timestamp: Date.now() - 2000,
 		});
 		const assistant = fauxAssistantMessage(label.padEnd(400, "y"), { timestamp: Date.now() - 1000 });
-		harness.sessionManager.appendMessage({
+		recentAssistantId = harness.sessionManager.appendMessage({
 			...assistant,
 			api: model.api,
 			provider: model.provider,
@@ -22,7 +22,7 @@ function seedHistory(harness: Harness, totalTokens = 650): string {
 		});
 	}
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-	return recentUserId;
+	return recentAssistantId;
 }
 
 // Regression coverage for #8133.
@@ -64,7 +64,7 @@ describe("AgentSession compaction model overrides", () => {
 				],
 			});
 			harnesses.push(harness);
-			const recentUserId = seedHistory(harness, path === "pre-prompt" ? 2500 : 650);
+			const recentAssistantId = seedHistory(harness, path === "pre-prompt" ? 2500 : 650);
 
 			if (path === "manual") {
 				await harness.session.compact();
@@ -89,8 +89,9 @@ describe("AgentSession compaction model overrides", () => {
 			expect(preparations[0]?.reason).toBe(
 				path === "manual" ? "manual" : path === "overflow" ? "overflow" : "threshold",
 			);
+			// Provider usage calibrates the retained tail; this fixture cuts within the recent turn.
 			if (path === "manual" || path === "pre-prompt") {
-				expect(preparations[0]?.preparation.firstKeptEntryId).toBe(recentUserId);
+				expect(preparations[0]?.preparation.firstKeptEntryId).toBe(recentAssistantId);
 			}
 			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
 			expect(harness.eventsOfType("compaction_end")[0]).toMatchObject({
@@ -168,8 +169,12 @@ describe("AgentSession compaction model overrides", () => {
 				requests.push(model.id);
 				return fauxAssistantMessage("summary");
 			},
+			(_context, _options, _state, model) => {
+				requests.push(model.id);
+				return fauxAssistantMessage("turn prefix summary");
+			},
 		]);
 		await harness.session.compact();
-		expect(requests).toEqual(["first"]);
+		expect(requests).toEqual(["first", "first"]);
 	});
 });

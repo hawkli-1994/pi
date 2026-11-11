@@ -293,7 +293,7 @@ function estimateTextAndImageContentChars(content: string | Array<{ type: string
 
 /**
  * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
+ * This is only a size heuristic; non-Latin text can use substantially more tokens.
  */
 export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
@@ -859,6 +859,7 @@ function findProjectedCutPoint(
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	options?: { tokensBefore?: number; force?: boolean },
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -881,8 +882,30 @@ export function prepareCompaction(
 		boundaryStart = prevCompactionIndex + 1;
 	}
 	const boundaryEnd = projectedEntries.length;
-	const tokensBefore = estimateProjectedContextTokens(projection, pathEntries).tokens;
-	const cutPoint = findProjectedCutPoint(projectedEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	// Triggering and cutting must use the same units. Provider usage can be several
+	// times the character estimate (CJK, images, tool schemas). Calibrate the retained
+	// tail against that usage instead of treating a 63K context as 13K of text.
+	// Recovery supplies the pre-edit pressure: omitting a truncated attempt invalidates
+	// its usage anchor but does not make the preceding conversation small.
+	const tokensBefore = options?.tokensBefore ?? estimateProjectedContextTokens(projection, pathEntries).tokens;
+	const estimatedTokens = projection.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+	const tokenScale = Math.max(1, tokensBefore / Math.max(1, estimatedTokens));
+	let cutPoint = findProjectedCutPoint(
+		projectedEntries,
+		boundaryStart,
+		boundaryEnd,
+		settings.keepRecentTokens / tokenScale,
+	);
+	if (
+		options?.force &&
+		!projectedEntries
+			.slice(boundaryStart, cutPoint.firstKeptEntryIndex)
+			.some((entry) => getMessagesFromProjectedEntryForCompaction(entry).length > 0)
+	) {
+		// keepRecentTokens is a preference, not permission to skip required compaction.
+		// A zero budget selects the newest safe boundary, keeping tool pairs together.
+		cutPoint = findProjectedCutPoint(projectedEntries, boundaryStart, boundaryEnd, 0);
+	}
 
 	const firstKeptEntry = projectedEntries[cutPoint.firstKeptEntryIndex]?.sourceEntry;
 	if (!firstKeptEntry?.id) return undefined;

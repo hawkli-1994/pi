@@ -549,6 +549,16 @@ export function buildSessionProjection(
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
+	// Provider-side output budgeting sees only messages, not session entry IDs. Do
+	// not let it reuse usage from the old projection after an edit or compaction,
+	// even when the boundary and retained response have identical timestamps.
+	// Raw entries keep the original usage for billing, history and diagnostics.
+	const boundary = path.findLastIndex((entry) => entry.type === "context_edit" || entry.type === "compaction");
+	const staleUsageIds = new Set(
+		path
+			.slice(0, Math.max(0, boundary))
+			.flatMap((entry) => (entry.type === "message" && entry.message.role === "assistant" ? [entry.id] : [])),
+	);
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -565,6 +575,17 @@ export function buildSessionProjection(
 					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
 		}),
 	);
+	for (const entry of projectedEntries) {
+		if (!staleUsageIds.has(entry.sourceEntry.id)) continue;
+		entry.messages = entry.messages.map((message) =>
+			message.role === "assistant"
+				? {
+						...message,
+						usage: { ...message.usage, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+					}
+				: message,
+		);
+	}
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),

@@ -123,11 +123,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const runAutoCompaction = (
 			session as unknown as {
-				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+				_runAutoCompaction: (
+					reason: "overflow" | "threshold",
+					willRetry: boolean,
+				) => Promise<
+					| { status: "compacted"; willContinue: boolean }
+					| { status: "failed"; errorMessage?: string; aborted: boolean }
+				>;
 			}
 		)._runAutoCompaction.bind(session);
 
-		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
+		await expect(runAutoCompaction("threshold", false)).resolves.toEqual({ status: "compacted", willContinue: true });
 
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
@@ -156,11 +162,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+					) => Promise<
+						| { status: "compacted"; willContinue: boolean }
+						| { status: "failed"; errorMessage?: string; aborted: boolean }
+					>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		const events: Array<{ type: string; reason: string; errorMessage?: string }> = [];
 		session.subscribe((event) => {
@@ -227,11 +239,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+					) => Promise<
+						| { status: "compacted"; willContinue: boolean }
+						| { status: "failed"; errorMessage?: string; aborted: boolean }
+					>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		const checkCompaction = (
 			session as unknown as {
@@ -300,11 +318,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+					) => Promise<
+						| { status: "compacted"; willContinue: boolean }
+						| { status: "failed"; errorMessage?: string; aborted: boolean }
+					>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		const checkCompaction = (
 			session as unknown as {
@@ -348,11 +372,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+					) => Promise<
+						| { status: "compacted"; willContinue: boolean }
+						| { status: "failed"; errorMessage?: string; aborted: boolean }
+					>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		const checkCompaction = (
 			session as unknown as {
@@ -429,11 +459,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+					) => Promise<
+						| { status: "compacted"; willContinue: boolean }
+						| { status: "failed"; errorMessage?: string; aborted: boolean }
+					>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		const checkCompaction = (
 			session as unknown as {

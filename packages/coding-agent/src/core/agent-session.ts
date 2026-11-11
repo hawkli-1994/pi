@@ -378,6 +378,15 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+type AutoCompactionOutcome =
+	| { status: "compacted"; willContinue: boolean }
+	| { status: "failed"; errorMessage?: string; aborted: boolean };
+
+interface CompactionRecovery {
+	drafts: SessionBoundaryDraft[];
+	tokensBefore: number;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -841,7 +850,8 @@ export class AgentSession {
 		if (!model || isVirtualModel(model) || !this._exceedsCompactionThreshold(model, projection)) {
 			return { ...context, messages: projection.messages };
 		}
-		await this._runAutoCompaction("threshold", false);
+		const result = await this._runAutoCompaction("threshold", false);
+		if (result.status === "failed") throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
 		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
 	}
 
@@ -897,7 +907,8 @@ export class AgentSession {
 			// The route stands: the router already decided this request. The state entry does not change
 			// the projection.
 			if (this._exceedsCompactionThreshold(route.model, projection)) {
-				await this._runAutoCompaction("threshold", false);
+				const result = await this._runAutoCompaction("threshold", false);
+				if (result.status === "failed") throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
 				({ previous, context } = await prepare());
 			}
 			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
@@ -1306,7 +1317,7 @@ export class AgentSession {
 	 * found in the projected context, so the pair stays together whether the attempt comes from
 	 * the current run or a resumed session. An unpaired result fails the next request (#11227).
 	 */
-	private _omitRecoveryAttempt(message: AssistantMessage): void {
+	private _recoveryOmissionDrafts(message: AssistantMessage): SessionBoundaryDraft[] {
 		const toolCallIds = new Set(message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
 		// A context edit replaces the projected copy, so match it by source entry as well.
 		const entryId = this._findPersistedMessageEntryId(message);
@@ -1327,13 +1338,13 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
-		for (const targetId of targetIds) {
-			if (!targetId) continue;
-			const editId = this.sessionManager.appendContextEdit(targetId, null);
-			const entry = this.sessionManager.getEntry(editId);
-			if (entry) this._emit({ type: "entry_appended", entry });
-		}
-		this._refreshFinalizedContext();
+		return targetIds.flatMap((targetId) =>
+			targetId ? [{ type: "context_edit" as const, targetId, replacement: null }] : [],
+		);
+	}
+
+	private _omitRecoveryAttempt(message: AssistantMessage): void {
+		this._commitBoundaryDrafts(this._recoveryOmissionDrafts(message));
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -3122,9 +3133,16 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const branch = this.sessionManager.getBranch();
+		const compactionEntry = getLatestCompactionEntry(branch);
+		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
+		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
+		const compactionIndex = compactionEntry ? branch.findIndex((entry) => entry.id === compactionEntry.id) : -1;
 		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
+			compactionEntry !== null &&
+			(assistantIndex >= 0 && compactionIndex >= 0
+				? assistantIndex < compactionIndex
+				: assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime());
 		if (assistantIsFromBeforeCompaction) {
 			return false;
 		}
@@ -3133,7 +3151,6 @@ export class AgentSession {
 		// A length stop is recoverable when output ended below the model's original desired limit,
 		// independent of the configured context size or any context-clamped provider request limit.
 		const currentProjection = this.sessionManager.buildSessionProjection();
-		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
 		const assistantIsProjected =
 			assistantEntryId === undefined ||
 			currentProjection.entries.some(
@@ -3141,8 +3158,6 @@ export class AgentSession {
 					entry.sourceEntry.id === assistantEntryId &&
 					entry.messages.some((message) => message.role === "assistant"),
 			);
-		const branch = this.sessionManager.getBranch();
-		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
 		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
 		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
 		const latestAssistantEdit = entriesAfterAssistant
@@ -3168,7 +3183,8 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				const result = await this._runAutoCompaction("overflow", false);
+				return result.status === "compacted" && result.willContinue;
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -3193,11 +3209,20 @@ export class AgentSession {
 				return false;
 			}
 
-			// Persistently omit the selected final attempt before post-run recovery compaction.
-			this._overflowRecoveryAttempted = true;
-			this._omitRecoveryAttempt(assistantMessage);
-			const retry = await this._runAutoCompaction("overflow", willRetry);
-			if (retry) this._failedResponse = assistantMessage;
+			// Plan against an edited preview while retaining the original pressure evidence.
+			// Failed/cancelled summaries must leave both the transcript and retry allowance intact.
+			const result = await this._runAutoCompaction("overflow", willRetry, {
+				drafts: this._recoveryOmissionDrafts(assistantMessage),
+				tokensBefore: Math.max(
+					estimateProjectedContextTokens(currentProjection, branch).tokens,
+					explicitOverflow ? contextWindow : 0,
+				),
+			});
+			const retry = result.status === "compacted" && result.willContinue;
+			if (retry) {
+				this._overflowRecoveryAttempted = true;
+				this._failedResponse = assistantMessage;
+			}
 			return retry;
 		}
 
@@ -3234,7 +3259,8 @@ export class AgentSession {
 			contextTokens = directContextTokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
+			const result = await this._runAutoCompaction("threshold", false);
+			return result.status === "compacted" && result.willContinue;
 		}
 		return false;
 	}
@@ -3247,9 +3273,13 @@ export class AgentSession {
 	 *
 	 * @param reason Automatic trigger selected by `_checkCompaction()`
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
-	 * @returns Whether the post-run loop should call `agent.continue()`
+	 * @returns A successful compaction and continuation decision, or an explicit failure
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		recovery?: CompactionRecovery,
+	): Promise<AutoCompactionOutcome> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -3259,13 +3289,7 @@ export class AgentSession {
 
 		try {
 			if (!model) {
-				return false;
-			}
-
-			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				return false;
+				throw new Error(formatNoModelSelectedMessage());
 			}
 
 			abortController = new AbortController();
@@ -3273,6 +3297,16 @@ export class AgentSession {
 			started = true;
 			this._emit({ type: "compaction_start", reason });
 			abortController.signal.throwIfAborted();
+
+			const pathEntries = recovery
+				? this._createBoundaryPreviewManager(recovery.drafts).getBranch()
+				: this.sessionManager.getBranch();
+			const preparation = prepareCompaction(pathEntries, settings, {
+				force: true,
+				tokensBefore: recovery?.tokensBefore,
+			});
+			if (!preparation)
+				throw new Error("Context pressure requires compaction, but no safe history boundary is available");
 
 			let extensionCompaction: CompactionResult | undefined;
 
@@ -3329,9 +3363,17 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
+			const committedDrafts = recovery ? this._applyBoundaryDrafts(this.sessionManager, recovery.drafts) : [];
+			if (recovery && recovery.drafts.length > 0) {
+				const previewIndex = pathEntries
+					.slice(-recovery.drafts.length)
+					.findIndex((entry) => entry.id === firstKeptEntryId);
+				if (previewIndex >= 0) firstKeptEntryId = committedDrafts[previewIndex].id;
+			}
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
+			for (const entry of committedDrafts) this._emit({ type: "entry_appended", entry });
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
@@ -3359,20 +3401,18 @@ export class AgentSession {
 			};
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
-			if (willRetry) return true;
-
 			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 			// Continue once so queued messages are delivered.
-			return this.agent.hasQueuedMessages();
+			return { status: "compacted", willContinue: willRetry || this.agent.hasQueuedMessages() };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
+			const errorMessage = aborted
+				? undefined
+				: reason === "overflow"
+					? `Context overflow recovery failed: ${message}`
+					: `Auto-compaction failed: ${message}`;
 			if (started) {
-				const errorMessage = aborted
-					? undefined
-					: reason === "overflow"
-						? `Context overflow recovery failed: ${message}`
-						: `Auto-compaction failed: ${message}`;
 				this._emit({
 					type: "compaction_end",
 					reason,
@@ -3389,7 +3429,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
-			return false;
+			return { status: "failed", errorMessage, aborted };
 		} finally {
 			if (this._autoCompactionAbortController === abortController) {
 				this._autoCompactionAbortController = undefined;

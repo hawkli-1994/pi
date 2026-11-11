@@ -31,6 +31,13 @@ export function clampMaxTokensToContext(model: Model<Api>, context: TranscriptCo
 	if (room < MIN_OUTPUT_WITH_RATIO_MARGIN) {
 		room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, model.contextWindow - input - CONTEXT_SAFETY_TOKENS);
 	}
+	if (room < MIN_MAX_TOKENS) {
+		// Surface context pressure to the caller's native overflow recovery. Sending a
+		// one-token request here manufactures a length stop without making any progress.
+		throw new Error(
+			`Context window exceeded: estimated input ${input} leaves no output budget in ${model.contextWindow} tokens`,
+		);
+	}
 	return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, room));
 }
 

@@ -17,7 +17,12 @@ import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
-	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_runAutoCompaction: (
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+	) => Promise<
+		{ status: "compacted"; willContinue: boolean } | { status: "failed"; errorMessage?: string; aborted: boolean }
+	>;
 };
 
 function createUsage(totalTokens: number) {
@@ -419,7 +424,10 @@ describe("AgentSession compaction characterization", () => {
 		};
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(false);
+		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toMatchObject({
+			status: "failed",
+			aborted: false,
+		});
 
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
 			reason: "threshold",
@@ -465,7 +473,7 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("x".repeat(5000));
 
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+		expect(harness.eventsOfType("compaction_end").find((event) => event.willRetry)).toMatchObject({
 			reason: "overflow",
 			aborted: false,
 			willRetry: true,
@@ -715,7 +723,9 @@ describe("AgentSession compaction characterization", () => {
 			totalTokens: 100,
 			timestamp: Date.now(),
 		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 		const compactionErrors: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "compaction_end" && event.errorMessage) {
@@ -799,7 +809,10 @@ describe("AgentSession compaction characterization", () => {
 
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(true);
+		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toEqual({
+			status: "compacted",
+			willContinue: true,
+		});
 	});
 
 	it("does not retry overflow recovery more than once", async () => {
@@ -811,7 +824,9 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "prompt is too long",
 			timestamp: Date.now(),
 		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 		const compactionErrors: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "compaction_end" && event.errorMessage) {
@@ -890,7 +905,9 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now(),
 		});
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
@@ -918,7 +935,9 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
@@ -939,7 +958,9 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
@@ -984,7 +1005,9 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi
+			.spyOn(sessionInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: true });
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
@@ -1002,8 +1025,12 @@ describe("AgentSession compaction characterization", () => {
 
 		const belowThresholdInternals = belowThresholdHarness.session as unknown as SessionWithCompactionInternals;
 		const disabledInternals = disabledHarness.session as unknown as SessionWithCompactionInternals;
-		const belowThresholdSpy = vi.spyOn(belowThresholdInternals, "_runAutoCompaction").mockResolvedValue(false);
-		const disabledSpy = vi.spyOn(disabledInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const belowThresholdSpy = vi
+			.spyOn(belowThresholdInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: false });
+		const disabledSpy = vi
+			.spyOn(disabledInternals, "_runAutoCompaction")
+			.mockResolvedValue({ status: "compacted", willContinue: false });
 
 		await belowThresholdInternals._checkCompaction(
 			createAssistant(belowThresholdHarness, { stopReason: "stop", totalTokens: 1_000, timestamp: Date.now() }),

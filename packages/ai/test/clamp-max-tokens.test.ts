@@ -65,7 +65,16 @@ describe("clampMaxTokensToContext", () => {
 		);
 	});
 
-	it("sends 1 token when the input already exceeds the window", () => {
-		expect(clampMaxTokensToContext(modelWith(943_718), contextWithInput(1_050_000), 943_718)).toBe(1);
+	it("surfaces exhausted context instead of manufacturing a one-token length stop", () => {
+		expect(() => clampMaxTokensToContext(modelWith(943_718), contextWithInput(1_050_000), 943_718)).toThrow(
+			"Context window exceeded",
+		);
+		expect(() => clampMaxTokensToContext(modelWith(4096, 65536), contextWithInput(63737), 4096)).toThrow(
+			"Context window exceeded",
+		);
+	});
+
+	it("honors an explicit one-token request when the context has room", () => {
+		expect(clampMaxTokensToContext(modelWith(4096, 65536), contextWithInput(1000), 1)).toBe(1);
 	});
 });

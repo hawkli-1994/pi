@@ -13,6 +13,32 @@ describe("compaction model overrides", () => {
 		expect(manager.getCompactionSettings(model)).toEqual(defaults);
 	});
 
+	it("fits native defaults to the current model across switches and reloads", async () => {
+		const manager = SettingsManager.inMemory();
+		const small = { ...model, contextWindow: 16384 };
+		const large = { ...model, contextWindow: 131072 };
+		expect(manager.getCompactionSettings(small)).toEqual({
+			enabled: true,
+			reserveTokens: 4096,
+			keepRecentTokens: 8192,
+		});
+		expect(manager.getCompactionSettings(large)).toEqual(defaults);
+		await manager.reload();
+		expect(manager.getCompactionSettings(small)).toEqual({
+			enabled: true,
+			reserveTokens: 4096,
+			keepRecentTokens: 8192,
+		});
+		manager.applyOverrides({
+			compaction: { reserveTokens: 2000, modelOverrides: { [modelKey]: { keepRecentTokens: 3000 } } },
+		});
+		expect(manager.getCompactionSettings(small)).toEqual({
+			enabled: true,
+			reserveTokens: 2000,
+			keepRecentTokens: 3000,
+		});
+	});
+
 	it("resolves each field independently and keeps individual getters consistent", () => {
 		const manager = SettingsManager.inMemory({
 			compaction: {

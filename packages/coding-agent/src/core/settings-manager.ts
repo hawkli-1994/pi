@@ -58,6 +58,8 @@ const DEFAULT_COMPACTION_TOKEN_SETTINGS: Required<CompactionModelOverride> = {
 	keepRecentTokens: SETTINGS_DEFAULTS.compaction.keepRecentTokens,
 };
 
+type CompactionModel = Pick<Model<string>, "provider" | "id"> & Partial<Pick<Model<string>, "contextWindow">>;
+
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -843,10 +845,7 @@ export class SettingsManager {
 		this.save();
 	}
 
-	private getCompactionTokenSetting(
-		field: keyof CompactionModelOverride,
-		model?: Pick<Model<string>, "provider" | "id">,
-	): number {
+	private getCompactionTokenSetting(field: keyof CompactionModelOverride, model?: CompactionModel): number {
 		const compaction = this.settings.compaction;
 		const ordinary = compaction?.[field];
 		if (ordinary !== undefined && (typeof ordinary !== "number" || !Number.isSafeInteger(ordinary) || ordinary < 0)) {
@@ -868,19 +867,27 @@ export class SettingsManager {
 				`Invalid compaction.modelOverrides["${modelKey}"].${field} setting: ${String(override)}. Expected a non-negative safe integer.`,
 			);
 		}
-		return override ?? ordinary ?? DEFAULT_COMPACTION_TOKEN_SETTINGS[field];
+		if (override !== undefined) return override;
+		if (ordinary !== undefined) return ordinary;
+		const defaultTokens = DEFAULT_COMPACTION_TOKEN_SETTINGS[field];
+		// Native defaults must fit local models too. Resolve at read time so switching
+		// models or reloading settings cannot retain a previous model's host-side cap.
+		const window = model?.contextWindow;
+		if (window === undefined || window <= 0) return defaultTokens;
+		const fraction = field === "reserveTokens" ? 0.25 : 0.5;
+		return Math.min(defaultTokens, Math.max(1, Math.floor(window * fraction)));
 	}
 
-	getCompactionReserveTokens(model?: Pick<Model<string>, "provider" | "id">): number {
+	getCompactionReserveTokens(model?: CompactionModel): number {
 		return this.getCompactionTokenSetting("reserveTokens", model);
 	}
 
-	getCompactionKeepRecentTokens(model?: Pick<Model<string>, "provider" | "id">): number {
+	getCompactionKeepRecentTokens(model?: CompactionModel): number {
 		return this.getCompactionTokenSetting("keepRecentTokens", model);
 	}
 
 	/** Resolve each token setting through model override, ordinary setting, then built-in default. */
-	getCompactionSettings(model?: Pick<Model<string>, "provider" | "id">): {
+	getCompactionSettings(model?: CompactionModel): {
 		enabled: boolean;
 		reserveTokens: number;
 		keepRecentTokens: number;
