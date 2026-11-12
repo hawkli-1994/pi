@@ -446,6 +446,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _autoCompactionFailed = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -882,7 +883,16 @@ export class AgentSession {
 			let { previous, context, projection } = await prepare();
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
-			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
+			if (!isVirtualModel(model)) {
+				// First/resumed requests do not run prepareNextTurn. Check after the new
+				// user input and prompt/tool changes have entered the canonical projection.
+				if (this._exceedsCompactionThreshold(model, projection)) {
+					const result = await this._runAutoCompaction("threshold", false);
+					if (result.status === "failed") throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
+					({ previous, context } = await prepare());
+				}
+				return { ...previous, context, model, thinkingLevel };
+			}
 
 			// The selection stays in agent state; only this request uses the routed model. A routing
 			// failure rejects, which ends the run with an error response. Only messages the user wrote
@@ -1954,6 +1964,10 @@ export class AgentSession {
 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
+		this._autoCompactionFailed = false;
+		// Explicit user/custom runs get a fresh recovery allowance before the
+		// pre-prompt check; message_start occurs too late to unlock a failed run.
+		this._overflowRecoveryAttempted = false;
 		let messages: AgentMessage[];
 		try {
 			messages = await this._prepareRun(trigger);
@@ -1984,7 +1998,8 @@ export class AgentSession {
 					await this.agent.continue();
 					continue;
 				}
-				if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary())) break;
+				if (this._autoCompactionFailed || this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary()))
+					break;
 				if (this._agentRunAbortRequested) break;
 				await this.agent.continue();
 			}
@@ -2060,6 +2075,9 @@ export class AgentSession {
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const message = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
+		// A failed preparation already emitted its cause. Do not interpret the
+		// resulting assistant error as a fresh overflow and repeat the same summary.
+		if (this._autoCompactionFailed) return false;
 		if (this._agentRunAbortRequested) {
 			this._finishCancelledRetry();
 			return false;
@@ -3184,6 +3202,8 @@ export class AgentSession {
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
 				const result = await this._runAutoCompaction("overflow", false);
+				if (result.status === "failed" && !skipAbortedCheck)
+					throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
 				return result.status === "compacted" && result.willContinue;
 			}
 
@@ -3206,6 +3226,7 @@ export class AgentSession {
 					willRetry: false,
 					fromExtension: false,
 				});
+				if (!skipAbortedCheck) throw new Error(errorMessage);
 				return false;
 			}
 
@@ -3219,6 +3240,8 @@ export class AgentSession {
 				),
 			});
 			const retry = result.status === "compacted" && result.willContinue;
+			if (result.status === "failed" && !skipAbortedCheck)
+				throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
 			if (retry) {
 				this._overflowRecoveryAttempted = true;
 				this._failedResponse = assistantMessage;
@@ -3260,6 +3283,8 @@ export class AgentSession {
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			const result = await this._runAutoCompaction("threshold", false);
+			if (result.status === "failed" && !skipAbortedCheck)
+				throw new Error(result.errorMessage ?? "Auto-compaction cancelled");
 			return result.status === "compacted" && result.willContinue;
 		}
 		return false;
@@ -3429,6 +3454,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
+			this._autoCompactionFailed = true;
 			return { status: "failed", errorMessage, aborted };
 		} finally {
 			if (this._autoCompactionAbortController === abortController) {

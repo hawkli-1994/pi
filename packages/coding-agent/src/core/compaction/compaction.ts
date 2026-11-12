@@ -34,6 +34,7 @@ import {
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
 import { combineUsage } from "../usage-totals.ts";
+import { completeBoundedSummary } from "./bounded-summary.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -726,17 +727,14 @@ export async function generateSummaryWithUsage(
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
-	promptText += basePrompt;
-
 	const completionOptions = createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel, sessionId);
 
-	const response = await completeSummarization(
+	const response = await completeBoundedSummary(
 		model,
-		buildSummarizationContext(promptText),
-		completionOptions,
-		streamFn,
-		retry,
-		callbacks,
+		promptText.trimEnd(),
+		(text) => buildSummarizationContext(`${text}\n\n${basePrompt}`),
+		(context) => completeSummarization(model, context, completionOptions, streamFn, retry, callbacks),
+		signal,
 	);
 
 	const failure = getSummarizationFailure(response, "Summarization");
@@ -1098,18 +1096,18 @@ async function generateTurnPrefixSummary(
 ): Promise<{ text: string; usage: Usage }> {
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	let promptText = `# Conversation\n${conversationText}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	let instructions = TURN_PREFIX_SUMMARIZATION_PROMPT;
 	if (customInstructions) {
-		promptText = `${promptText}\n\nAdditional focus: ${customInstructions}`;
+		instructions = `${instructions}\n\nAdditional focus: ${customInstructions}`;
 	}
-
-	const response = await completeSummarization(
+	const completionOptions = createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel, sessionId);
+	const response = await completeBoundedSummary(
 		model,
-		buildSummarizationContext(promptText),
-		createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel, sessionId),
-		streamFn,
-		retry,
-		callbacks,
+		conversationText,
+		(text) => buildSummarizationContext(`# Conversation\n${text}\n\n# Instructions\n${instructions}`),
+		(context) => completeSummarization(model, context, completionOptions, streamFn, retry, callbacks),
+		signal,
+		"Turn prefix summarization",
 	);
 
 	const failure = getSummarizationFailure(response, "Turn prefix summarization");

@@ -298,6 +298,8 @@ test("consecutive length stops exhaust one native retry without hiding the final
 			),
 		).toBe(true);
 		expect(run.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "length" });
+		await run.session.prompt("Retry now and verify all 32 files.");
+		expect(run.completed).toBe(32);
 	} finally {
 		await run.cleanup();
 	}
@@ -326,3 +328,32 @@ test("cancelling recovery leaves the transcript and usage evidence intact", asyn
 		await run.cleanup();
 	}
 });
+
+test.each(["threshold", "summary-failure"] as const)(
+	"the first physical request checks newly added input and does not retry a failed summary: %s",
+	async (scenario) => {
+		const run = await createPressureSession(scenario, true);
+		try {
+			await run.session.prompt(`Create and verify all 32 files.\n${"additional evidence ".repeat(9000)}`);
+			expect(run.requests[0].summary).toBe(true);
+			if (scenario === "summary-failure") {
+				expect(run.completed).toBe(0);
+				expect(run.requests).toHaveLength(1);
+				expect(run.session.messages.at(-1)).toMatchObject({
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: expect.stringContaining("summary unavailable"),
+				});
+				expect(
+					run.manager.getBranch().some((entry) => entry.type === "compaction" || entry.type === "context_edit"),
+				).toBe(false);
+				run.allowSummary();
+				await run.session.prompt("Continue and verify all 32 files.");
+			}
+			expect(run.completed).toBe(32);
+			expect(run.serverErrors).toEqual([]);
+		} finally {
+			await run.cleanup();
+		}
+	},
+);
