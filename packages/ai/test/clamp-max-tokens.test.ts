@@ -65,6 +65,24 @@ describe("clampMaxTokensToContext", () => {
 		);
 	});
 
+	it.each([
+		[1000, 150],
+		[4096, 615],
+		[8192, 1229],
+		[65536, 4096],
+		[262144, 4096],
+	])("fits input, safety margin, and output in a %s-token window", (contextWindow, safetyMargin) => {
+		const input = 100;
+		const currentModel = modelWith(4096, contextWindow);
+		const output = clampMaxTokensToContext(currentModel, contextWithInput(input), currentModel.maxTokens);
+		expect(output).toBe(Math.min(4096, contextWindow - input - safetyMargin));
+		expect(input + safetyMargin + output).toBeLessThanOrEqual(contextWindow);
+		expect(output).toBeGreaterThan(1);
+		expect(() =>
+			clampMaxTokensToContext(currentModel, contextWithInput(contextWindow - safetyMargin), currentModel.maxTokens),
+		).toThrow("Context window exceeded");
+	});
+
 	it("surfaces exhausted context instead of manufacturing a one-token length stop", () => {
 		expect(() => clampMaxTokensToContext(modelWith(943_718), contextWithInput(1_050_000), 943_718)).toThrow(
 			"Context window exceeded",

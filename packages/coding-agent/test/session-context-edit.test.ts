@@ -56,7 +56,7 @@ describe("session context edits", () => {
 		expect((session.getEntry(resultId) as { message: ToolResultMessage }).message).toBe(result);
 	});
 
-	it("replaces only content and lets the latest edit win", () => {
+	it("lets the latest content edit win and invalidates only projected usage", () => {
 		const session = SessionManager.inMemory();
 		const targetId = session.appendMessage(assistant("original"));
 		session.appendContextEdit(targetId, { content: [{ type: "text", text: "first" }] });
@@ -67,8 +67,10 @@ describe("session context edits", () => {
 		expect(projected.role).toBe("assistant");
 		if (projected.role !== "assistant") throw new Error("expected assistant");
 		expect(text(projected)).toBe("restored");
-		expect(projected.usage.totalTokens).toBe(11);
-		expect(text((session.getEntry(targetId) as { message: AssistantMessage }).message)).toBe("original");
+		expect(projected.usage.totalTokens).toBe(0);
+		const original = (session.getEntry(targetId) as { message: AssistantMessage }).message;
+		expect(text(original)).toBe("original");
+		expect(original.usage.totalTokens).toBe(11);
 	});
 
 	it("normalizes string replacements for array-only assistant and tool-result roles", () => {

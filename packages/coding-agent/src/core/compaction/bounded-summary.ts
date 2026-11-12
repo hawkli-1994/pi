@@ -19,16 +19,23 @@ export async function completeBoundedSummary(
 	// must never replace the original transcript, even when it contains usable text.
 	const summarize = async (text: string, part = false): Promise<AssistantMessage> => {
 		signal?.throwIfAborted();
-		const context = buildContext(
-			part
-				? `This is a contiguous excerpt or ordered partial summaries. It may start or end inside a message. Summarize only the information present.\n\n${text}`
-				: text,
-		);
+		const prefix = part
+			? "This is a contiguous excerpt or ordered partial summaries. It may start or end inside a message. Summarize only the information present.\n\n"
+			: "";
+		const context = buildContext(`${prefix}${text}`);
+		let available: number;
+		try {
+			available = clampMaxTokensToContext(model, buildContext(prefix), Number.MAX_SAFE_INTEGER);
+		} catch {
+			throw new Error("Summary instructions leave no room for source text in the model context");
+		}
 		let fits = true;
 		try {
 			// Reuse the transport's estimate and safety margin. Leave room for a useful
-			// summary rather than requesting a nearly empty, context-clamped answer.
-			fits = clampMaxTokensToContext(model, context, model.maxTokens) >= Math.min(model.maxTokens, 4096);
+			// summary, but account for fixed instructions before dividing the remaining
+			// space between source text and output on small windows.
+			const minimumOutput = Math.min(model.maxTokens, 4096, Math.max(1, Math.floor(available / 2)));
+			fits = clampMaxTokensToContext(model, context, model.maxTokens) >= minimumOutput;
 		} catch {
 			fits = false;
 		}

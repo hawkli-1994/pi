@@ -128,10 +128,10 @@ describe("AgentSession actionable boundaries", () => {
 	it("keeps a boundary replacement verbatim through threshold compaction", async () => {
 		let handled = false;
 		const requests: string[] = [];
-		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(100);
+		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(1000);
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			models: [{ id: "faux-1", contextWindow: 32768, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 8192 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", (event, ctx) => {
@@ -161,11 +161,18 @@ describe("AgentSession actionable boundaries", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "older input", timestamp: Date.now() - 2 });
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: "old history ".repeat(6500),
+			timestamp: Date.now() - 2,
+		});
 		harness.sessionManager.appendMessage(fauxAssistantMessage("older answer", { timestamp: Date.now() - 1 }));
 		harness.session.refreshContext();
 		harness.setResponses([
-			fauxAssistantMessage("answered original input"),
+			() => {
+				expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+				return fauxAssistantMessage("answered original input");
+			},
 			(context) => {
 				requests.push(JSON.stringify(context.messages));
 				return fauxAssistantMessage("answered replacement");
@@ -176,16 +183,17 @@ describe("AgentSession actionable boundaries", () => {
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain("EXACT-REPLACEMENT-INSTRUCTION");
+		expect(requests[0]).toContain(instruction);
+		expect(harness.eventsOfType("compaction_start")[0]?.reason).toBe("threshold");
 	});
 
 	it("keeps boundary input verbatim through threshold compaction when metadata follows it", async () => {
 		let handled = false;
 		const requests: string[] = [];
-		const instruction = "EXACT-UNSENT-INSTRUCTION ".repeat(100);
+		const instruction = "EXACT-UNSENT-INSTRUCTION ".repeat(1000);
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			models: [{ id: "faux-1", contextWindow: 32768, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 8192 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", () => {
@@ -216,18 +224,22 @@ describe("AgentSession actionable boundaries", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("first"),
+			() => {
+				expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+				return fauxAssistantMessage("first");
+			},
 			(context) => {
 				requests.push(JSON.stringify(context.messages));
 				return fauxAssistantMessage("second");
 			},
 		]);
 
-		await harness.session.prompt("old input ".repeat(500));
+		await harness.session.prompt("old input ".repeat(7500));
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain("EXACT-UNSENT-INSTRUCTION");
+		expect(requests[0]).toContain(instruction);
+		expect(harness.eventsOfType("compaction_start")[0]?.reason).toBe("threshold");
 	});
 
 	it("refreshes canonical context before publishing boundary entry notifications", async () => {
@@ -786,7 +798,7 @@ describe("durable length recovery", () => {
 			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
 		};
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			tools: [tool],
 			extensionFactories: [
@@ -805,6 +817,8 @@ describe("durable length recovery", () => {
 		harness.setResponses([
 			fauxAssistantMessage("first partial", { stopReason: "length" }),
 			fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" }),
+			// Keep a whole tool pair before the retained pair for the second compaction.
+			fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" }),
 			() => fauxAssistantMessage("second partial", { stopReason: "length", timestamp: Date.now() + 1_000 }),
 			() => fauxAssistantMessage("completed second recovery", { timestamp: Date.now() + 2_000 }),
 		]);
@@ -822,14 +836,17 @@ describe("durable length recovery", () => {
 					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "length",
 			);
 		expect(lengthResponses).toHaveLength(2);
-		expect(omittedIds).toEqual(expect.arrayContaining(lengthResponses.map((entry) => entry.id)));
-		expect(harness.faux.state.callCount).toBe(3);
+		expect(omittedIds, JSON.stringify(harness.eventsOfType("compaction_end"))).toEqual(
+			expect.arrayContaining(lengthResponses.map((entry) => entry.id)),
+		);
+		expect(harness.faux.state.callCount).toBe(5);
+		expect(harness.session.getLastAssistantText()).toBe("completed second recovery");
 	});
 
 	it("gives a distinct queued follow-up its own length-recovery budget", async () => {
 		let queued = false;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -894,11 +911,17 @@ describe("durable length recovery", () => {
 
 	it("omits a recoverable projected replacement by its source entry ID", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", () => ({ cancel: true }));
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "recovered replacement",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
 				},
 			],
 		});
@@ -930,7 +953,7 @@ describe("durable length recovery", () => {
 		let replaced = false;
 		let overflowId: string | undefined;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -1030,9 +1053,9 @@ describe("durable length recovery", () => {
 		);
 	});
 
-	it("keeps omissions and does not retry when recovery compaction fails", async () => {
+	it("keeps original history and does not retry when recovery compaction fails", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: {
 				compaction: { keepRecentTokens: 1, reserveTokens: 0 },
 				retry: { enabled: false, maxRetries: 0, baseDelayMs: 1 },
@@ -1048,7 +1071,7 @@ describe("durable length recovery", () => {
 		await harness.session.prompt("x".repeat(5000));
 
 		const entries = harness.sessionManager.getEntries();
-		expect(entries.some((entry) => entry.type === "context_edit")).toBe(true);
+		expect(entries.some((entry) => entry.type === "context_edit")).toBe(false);
 		expect(entries.some((entry) => entry.type === "compaction")).toBe(false);
 		expect(
 			entries.some((entry) => entry.type === "message" && getMessageText(entry.message) === "partial response"),
@@ -1057,7 +1080,7 @@ describe("durable length recovery", () => {
 			harness.sessionManager
 				.buildSessionProjection()
 				.messages.some((message) => getMessageText(message) === "partial response"),
-		).toBe(false);
+		).toBe(true);
 		expect(harness.faux.state.callCount).toBe(2);
 	});
 });

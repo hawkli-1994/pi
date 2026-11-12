@@ -449,7 +449,7 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts and resumes after a length stop below the desired output limit", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -486,7 +486,7 @@ describe("AgentSession compaction characterization", () => {
 	it.each([false, true])(
 		"compacts after an oversized tool result in the same run (model override: %s)",
 		async (modelOverride) => {
-			const toolResult = `large-tool-result:${"x".repeat(8000)}`;
+			const toolResult = `large-tool-result:${"x".repeat(24000)}`;
 			const largeTool: AgentTool = {
 				name: "large_result",
 				label: "Large result",
@@ -497,16 +497,16 @@ describe("AgentSession compaction characterization", () => {
 			const order: string[] = [];
 			const observedSettings: unknown[] = [];
 			const harness = await createHarness({
-				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				models: [{ id: "faux-1", contextWindow: 16384, maxTokens: 100 }],
 				settings: {
 					compaction: modelOverride
 						? {
 								enabled: true,
 								reserveTokens: 0,
 								keepRecentTokens: 20000,
-								modelOverrides: { "faux/faux-1": { reserveTokens: 400, keepRecentTokens: 1750 } },
+								modelOverrides: { "faux/faux-1": { reserveTokens: 4096, keepRecentTokens: 1750 } },
 							}
-						: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 },
+						: { enabled: true, reserveTokens: 4096, keepRecentTokens: 1750 },
 				},
 				tools: [largeTool],
 				extensionFactories: [
@@ -529,8 +529,8 @@ describe("AgentSession compaction characterization", () => {
 			harnesses.push(harness);
 			let resumedRequest = "";
 			harness.setResponses([
-				fauxAssistantMessage(`old-history:${"a".repeat(800)}`),
-				fauxAssistantMessage(`recent-history:${"b".repeat(800)}`),
+				fauxAssistantMessage(`old-history:${"a".repeat(12000)}`),
+				fauxAssistantMessage(`recent-history:${"b".repeat(12000)}`),
 				fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
 				(context) => {
 					order.push("provider");
@@ -541,18 +541,19 @@ describe("AgentSession compaction characterization", () => {
 
 			await harness.session.prompt("seed old history");
 			await harness.session.prompt("seed recent history");
+			expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
 			const agentStartsBefore = harness.eventsOfType("agent_start").length;
 			await harness.session.prompt("run the large tool");
 
 			expect(order.slice(0, 2)).toEqual(["compaction", "provider"]);
-			expect(observedSettings[0]).toEqual({ enabled: true, reserveTokens: 400, keepRecentTokens: 1750 });
+			expect(observedSettings[0]).toEqual({ enabled: true, reserveTokens: 4096, keepRecentTokens: 1750 });
 			expect(harness.eventsOfType("agent_start")).toHaveLength(agentStartsBefore + 1);
 			expect(harness.eventsOfType("compaction_start").at(-1)).toEqual({
 				type: "compaction_start",
 				reason: "threshold",
 			});
 			expect(resumedRequest).toContain("compacted history");
-			expect(resumedRequest).toContain("large-tool-result");
+			expect(resumedRequest).toContain(toolResult);
 			expect(harness.session.getLastAssistantText()).toBe("finished after compaction");
 		},
 	);
@@ -846,9 +847,13 @@ describe("AgentSession compaction characterization", () => {
 	it("compacts successful overflow responses without retrying", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
-			models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 100 }],
 			extensionFactories: [
 				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role !== "assistant") return;
+						return { message: { ...event.message, usage: createUsage(9000) } };
+					});
 					pi.on("session_before_compact", async (event) => ({
 						compaction: {
 							summary: "successful overflow compacted",

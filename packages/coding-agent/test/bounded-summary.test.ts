@@ -49,6 +49,30 @@ const source = Array.from(
 	(_, index) => `MARK${String(index).padStart(3, "0")} ${"evidence ".repeat(3000)}\n`,
 ).join("");
 
+test.each([
+	[1000, 150],
+	[4096, 615],
+	[8192, 1229],
+])("summarizes oversized history with feasible requests in a %s-token window", async (contextWindow, margin) => {
+	const currentModel = { ...model, contextWindow, maxTokens: 4096 };
+	let calls = 0;
+	const result = await completeBoundedSummary(
+		currentModel,
+		"evidence ".repeat(12000),
+		buildContext,
+		async (context) => {
+			calls++;
+			const input = estimateContextTokens(context).tokens;
+			const output = clampMaxTokensToContext(currentModel, context, currentModel.maxTokens);
+			expect(input + margin + output).toBeLessThanOrEqual(contextWindow);
+			expect(output).toBeGreaterThan(100);
+			return reply("Checkpoint.");
+		},
+	);
+	expect(calls).toBeGreaterThan(1);
+	expect(contentText(result.content)).toBe("Checkpoint.");
+});
+
 test.each([65536, 262144])(
 	"reduces an oversized history without losing ordered evidence at window %s",
 	async (contextWindow) => {

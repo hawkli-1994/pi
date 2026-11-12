@@ -46,7 +46,7 @@ describe("automatic compaction cancellation regressions", () => {
 	// Regression test for #9340.
 	it("does not start post-run auto-compaction after abort", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 200, maxTokens: 50 }],
+			models: [{ id: "faux-1", contextWindow: 8192, maxTokens: 50 }],
 			settings: {
 				compaction: { enabled: true, reserveTokens: 50, keepRecentTokens: 1 },
 				retry: { enabled: false },
@@ -64,6 +64,9 @@ describe("automatic compaction cancellation regressions", () => {
 		]);
 		harness.session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
+				// The initial request fits. Introduce post-run pressure only after it ends.
+				harness.sessionManager.appendMessage({ role: "user", content: "x".repeat(40000), timestamp: Date.now() });
+				harness.session.refreshContext();
 				harness.session.abortCompaction();
 				void harness.session.abort();
 			}
@@ -71,6 +74,7 @@ describe("automatic compaction cancellation regressions", () => {
 
 		await harness.session.prompt("z".repeat(1000));
 
+		expect(harness.faux.state.callCount).toBe(1);
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
 	});
 
