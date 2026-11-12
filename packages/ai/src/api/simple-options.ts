@@ -26,10 +26,20 @@ const MIN_MAX_TOKENS = 1;
 export function clampMaxTokensToContext(model: Model<Api>, context: TranscriptContext, maxTokens: number): number {
 	if (model.contextWindow <= 0) return Math.max(MIN_MAX_TOKENS, maxTokens);
 	const input = estimateContextTokens(context).tokens;
-	const margin = Math.max(CONTEXT_SAFETY_TOKENS, Math.ceil(input * CONTEXT_SAFETY_RATIO));
+	// A fixed 4096-token reserve must not consume a small model's entire window.
+	// Reserving 15% of that window still covers the input overcount described above.
+	const fixedMargin = Math.min(CONTEXT_SAFETY_TOKENS, Math.ceil(model.contextWindow * CONTEXT_SAFETY_RATIO));
+	const margin = Math.max(fixedMargin, Math.ceil(input * CONTEXT_SAFETY_RATIO));
 	let room = model.contextWindow - input - margin;
 	if (room < MIN_OUTPUT_WITH_RATIO_MARGIN) {
-		room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, model.contextWindow - input - CONTEXT_SAFETY_TOKENS);
+		room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, model.contextWindow - input - fixedMargin);
+	}
+	if (room < MIN_MAX_TOKENS) {
+		// Surface context pressure to the caller's native overflow recovery. Sending a
+		// one-token request here manufactures a length stop without making any progress.
+		throw new Error(
+			`Context window exceeded: estimated input ${input} leaves no output budget in ${model.contextWindow} tokens`,
+		);
 	}
 	return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, room));
 }
