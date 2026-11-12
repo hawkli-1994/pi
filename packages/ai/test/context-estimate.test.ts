@@ -54,7 +54,8 @@ describe("context token estimation", () => {
 			trailingTokens: 1_000,
 			lastUsageIndex: 0,
 		});
-		expect(buildBaseOptions(model, context).maxTokens).toBe(2_904);
+		// 10K window - 3K input - 1.5K safety reserve.
+		expect(buildBaseOptions(model, context).maxTokens).toBe(5_500);
 	});
 
 	it("ignores stale assistant usage after a newer message is inserted before it", () => {
@@ -73,7 +74,7 @@ describe("context token estimation", () => {
 			trailingTokens: 1_149,
 			lastUsageIndex: null,
 		});
-		expect(buildBaseOptions(model, context).maxTokens).toBe(4_755);
+		expect(buildBaseOptions(model, context).maxTokens).toBe(7_351);
 	});
 
 	it("uses assistant usage again after a response to the inserted context", () => {

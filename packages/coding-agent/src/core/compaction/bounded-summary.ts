@@ -61,6 +61,11 @@ export async function completeBoundedSummary(
 			// Split this rejected input instead of retrying the same oversized request.
 		}
 		let middle = Math.floor(text.length / 2);
+		// Prefer a nearby record or word boundary so identifiers are not needlessly
+		// split between summaries. Keep both halves substantial for bounded recursion.
+		let boundary = text.lastIndexOf("\n", middle - 1);
+		if (boundary < Math.floor(middle / 2)) boundary = text.lastIndexOf(" ", middle - 1);
+		if (boundary >= Math.floor(middle / 2)) middle = boundary + 1;
 		// Do not split a UTF-16 surrogate pair, including when text is a single code point.
 		const before = text.charCodeAt(middle - 1);
 		const after = text.charCodeAt(middle);
